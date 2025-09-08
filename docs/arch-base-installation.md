@@ -37,7 +37,34 @@
   timedatectl set-ntp true
   ```
 
-#### 5. Set the console keyboard layout and font
+#### 5. Optional: Enable SSH for Remote Installation
+
+**If you want to continue the installation from another computer (recommended for easier copy/paste):**
+
+- Set a temporary root password:
+  ```bash
+  passwd
+  ```
+
+- Start SSH service:
+  ```bash
+  systemctl start sshd
+  ```
+
+- Find the IP address:
+  ```bash
+  ip addr show
+  ```
+  
+- From another computer, connect via SSH:
+  ```bash
+  ssh root@[IP_ADDRESS]
+  ```
+  
+**Benefits**: Easier to copy/paste commands, use multiple terminals, access documentation
+**Security**: This is temporary - SSH will be configured properly later
+
+#### 6. Set the console keyboard layout and font
 
 - The default console keymap is US. Available layouts can be listed with:
 
@@ -56,7 +83,7 @@
 
 ### Disk Partitioning
 
-#### 1. Identify Disks
+#### 7. Identify Disks
 
 - List available disks:
   ```bash
@@ -65,84 +92,104 @@
   fdisk -l
   ```
 
-#### 2. Partition the Disk
+#### 8. Partition the Disk
 
-Use fdisk or other tool.
+Use fdisk to create a minimal partition scheme for full disk encryption.
 
   ```bash
-  fdisk nvme0n1
+  fdisk /dev/nvme0n1
   ```
 
 - Create partitions:
-  - **EFI Partition**: `/dev/nvme0n1p1` (512 MB, type EFI System)
-  - **Root Partition**: `/dev/nvme0n1p2` (remaining space minus swap size)
-  - **Swap Partition**: `/dev/nvme0n1p3` (swap size = RAM size, e.g., 16 GB)
+  - **EFI Partition**: `/dev/nvme0n1p1` (1 GB, type EFI System)
+  - **LUKS Partition**: `/dev/nvme0n1p2` (remaining space, type Linux LVM)
 
-#### 3. Encrypt Partitions
+**Partition Layout:**
+```
+/dev/nvme0n1p1  1G     EFI System Partition
+/dev/nvme0n1p2  Rest   Linux LVM (will contain encrypted LVM)
+```
 
-- Encrypt root and swap:
+#### 9. Setup Full Disk Encryption (LUKS)
+
+- Encrypt the main partition (full disk encryption):
 
   ```bash
-  cryptsetup luksFormat /dev/nvme0n1p2
-  cryptsetup open /dev/nvme0n1p2 cryptroot
-
-  cryptsetup luksFormat /dev/nvme0n1p3
-  cryptsetup open /dev/nvme0n1p3 nvme0n1p3
+  cryptsetup luksFormat --type luks2 /dev/nvme0n1p2
+  cryptsetup open /dev/nvme0n1p2 cryptlvm
   ```
 
-#### 4. Format and Mount Partitions
+#### 10. Setup LVM on LUKS
 
-- Using fdisk
+- Create LVM physical volume, volume group, and logical volume:
+
   ```bash
-  # To list disks
-  fdisk -l
-
-  # Choose disk and start partition
-  fdisk nvme0n1p
+  # Create physical volume on encrypted device
+  pvcreate /dev/mapper/cryptlvm
+  
+  # Create volume group
+  vgcreate vg0 /dev/mapper/cryptlvm
+  
+  # Create single root logical volume (uses all available space)
+  lvcreate -l 100%FREE vg0 -n root
   ```
-- Format partitions:
+
+#### 11. Format Partitions
+
+- Format the EFI partition and LVM volume:
+
   ```bash
-  mkfs.fat -F32 nvme0n1p1
-  mkfs.btrfs /dev/mapper/cryptroot
-  mkswap /dev/mapper/cryptswap
-  swapon /dev/mapper/cryptswap
+  # Format EFI partition
+  mkfs.fat -F32 /dev/nvme0n1p1
+  
+  # Format root volume with Btrfs
+  mkfs.btrfs -L root /dev/vg0/root
   ```
-- Create and mount Btrfs subvolumes:
+
+#### 12. Create and Mount Btrfs Subvolumes
+
+- Create Btrfs subvolumes with optimal structure:
 
   ```bash
-  # Mount the Btrfs root
-  mount /dev/mapper/cryptroot /mnt
-
-  # Create subvolumes
-  btrfs subvolume create /mnt/@       # Root filesystem
-  btrfs subvolume create /mnt/@home  # User data
-  btrfs subvolume create /mnt/@log   # Logs
-  btrfs subvolume create /mnt/@cache # Cache
-  btrfs subvolume create /mnt/@snapshots # Snapshots
-
-  # Unmount the Btrfs root
+  # Mount root volume temporarily
+  mount /dev/vg0/root /mnt
+  
+  # Create subvolumes (modern Btrfs layout)
+  btrfs subvolume create /mnt/@             # Root filesystem
+  btrfs subvolume create /mnt/@home         # User home directories
+  btrfs subvolume create /mnt/@var          # System logs and cache
+  btrfs subvolume create /mnt/@tmp          # Temporary files
+  btrfs subvolume create /mnt/@snapshots    # System snapshots
+  
+  # Unmount to remount with subvolumes
   umount /mnt
-
-  # Mount subvolumes with compression
-  mount -o compress=zstd,subvol=@ /dev/mapper/cryptroot /mnt
-  mkdir /mnt/{boot,home,var/log,var/cache,.snapshots}
-  mount -o compress=zstd,subvol=@home /dev/mapper/cryptroot /mnt/home
-  mount -o compress=zstd,subvol=@log /dev/mapper/cryptroot /mnt/var/log
-  mount -o compress=zstd,subvol=@cache /dev/mapper/cryptroot /mnt/var/cache
-  mount -o compress=zstd,subvol=@snapshots /dev/mapper/cryptroot /mnt/.snapshots
-  mount nvme0n1p1 /mnt/boot
+  
+  # Mount root subvolume with optimal options (includes SSD optimization)
+  mount -o noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@ /dev/vg0/root /mnt
+  
+  # Create directories for mounting subvolumes and EFI partition
+  mkdir -p /mnt/{boot,home,var,tmp,.snapshots}
+  
+  # Mount all subvolumes with optimal options
+  mount -o noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@home /dev/vg0/root /mnt/home
+  mount -o noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@var /dev/vg0/root /mnt/var
+  mount -o noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@tmp /dev/vg0/root /mnt/tmp
+  mount -o noatime,compress=zstd:3,space_cache=v2,discard=async,subvol=@snapshots /dev/vg0/root /mnt/.snapshots
+  
+  # Mount EFI partition
+  mount /dev/nvme0n1p1 /mnt/boot
   ```
 
 ### Installation
 
-#### 1. Install Essential Packages
+#### 13. Install Essential Packages
 
-- Install the base system:
+- Install the base system with all necessary packages:
   ```bash
-  pacstrap /mnt base linux linux-firmware btrfs-progs
+  pacstrap /mnt base linux linux-firmware btrfs-progs lvm2 cryptsetup zram-generator
   ```
 
-#### 2. Generate Fstab
+#### 14. Generate Fstab
 
 - Generate the fstab file:
   ```bash
@@ -153,7 +200,7 @@ Use fdisk or other tool.
   cat /mnt/etc/fstab
   ```
 
-#### 3. Chroot into the Installed System
+#### 15. Chroot into the Installed System
 
 - Change root into the new system:
   ```bash
@@ -162,7 +209,7 @@ Use fdisk or other tool.
 
 ### Configuration
 
-#### 1. Set Time Zone (I live in Sweden so will set my timezone)
+#### 16. Set Time Zone (I live in Sweden so will set my timezone)
 
 - Set your time zone:
   ```bash
@@ -170,7 +217,7 @@ Use fdisk or other tool.
   hwclock --systohc
   ```
 
-#### 2. Configure Locale
+#### 17. Configure Locale
 
 - Uncomment your locale in `/etc/locale.gen` (e.g., `en_US.UTF-8 UTF-8`):
   ```bash
@@ -185,33 +232,42 @@ Use fdisk or other tool.
   echo "LANG=en_US.UTF-8" > /etc/locale.conf
   ```
 
-#### 3. Set Hostname
+#### 18. Set Hostname
 
-- Set the hostname:
+- Choose and set your hostname (replace 'your-hostname' with desired name):
   ```bash
-  echo "archlinux" > /etc/hostname
+  echo "your-hostname" > /etc/hostname
   ```
+  
+- Configure hosts file:
+  ```bash
+  cat > /etc/hosts << EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   your-hostname.localdomain your-hostname
+EOF
+  ```
+  
+  **Note**: Replace 'your-hostname' with the same name you used above.
 
-#### 4. Configure Initramfs with Dracut
+#### 19. Configure Initramfs with mkinitcpio
 
-- Install Dracut:
+- Edit mkinitcpio configuration:
   ```bash
-  pacman -S dracut
+  nano /etc/mkinitcpio.conf
   ```
-- Create Dracut configuration:
+  
+- Update the HOOKS line to include encryption and LVM support:
   ```bash
-  nano /etc/dracut.conf.d/crypt.conf
+  HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt lvm2 filesystems fsck)
   ```
-  Add:
-  ```
-  add_dracutmodules+=" crypt lvm resume btrfs "
-  ```
+  
 - Regenerate initramfs:
   ```bash
-  dracut --force --regenerate-all
+  mkinitcpio -P
   ```
 
-#### 5. Install and Configure GRUB
+#### 20. Install and Configure GRUB
 
 - Install GRUB:
   ```bash
@@ -220,28 +276,25 @@ Use fdisk or other tool.
 - Install GRUB to EFI partition:
   ```bash
   grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-  
-  # For regular BIOS
-  grub-install --target=i386-pc /dev/nvme0n1p1
   ```
-- Get UUID of partition
+- Get UUID of encrypted partition:
   ```bash
-  sudo blkid /dev/nvme0n1p2
+  blkid /dev/nvme0n1p2
   ```
 - Edit `/etc/default/grub`:
   ```bash
   nano /etc/default/grub
   ```
-  Add:
+  Update the GRUB_CMDLINE_LINUX line:
   ```
-  cryptdevice=UUID=<UUID_of_nvme0n1p2>:cryptroot resume=/dev/mapper/cryptswap
+  GRUB_CMDLINE_LINUX="cryptdevice=UUID=<UUID_of_nvme0n1p2>:cryptlvm root=/dev/vg0/root rootflags=subvol=@"
   ```
 - Generate GRUB configuration:
   ```bash
   grub-mkconfig -o /boot/grub/grub.cfg
   ```
 
-### 6. Set Root Password and Create a User
+#### 21. Set Root Password and Create a User
 
 - Set the root password:
 
@@ -269,7 +322,23 @@ Use fdisk or other tool.
   %wheel ALL=(ALL:ALL) ALL
   ```
 
-#### 7. Finalize
+#### 22. Configure Zram (Replaces Traditional Swap)
+
+- Configure zram for swap:
+  ```bash
+  cat > /etc/systemd/zram-generator.conf << EOF
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+EOF
+  ```
+
+- Enable zram service:
+  ```bash
+  systemctl enable systemd-zram-setup@zram0.service
+  ```
+
+#### 23. Finalize
 
 - Exit chroot:
   ```bash
@@ -278,6 +347,11 @@ Use fdisk or other tool.
 - Unmount partitions:
   ```bash
   umount -R /mnt
+  ```
+- Close encrypted volume:
+  ```bash
+  vgchange -an vg0
+  cryptsetup close cryptlvm
   ```
 - Reboot:
   ```bash
@@ -288,21 +362,44 @@ Use fdisk or other tool.
 
 ## Part 2: Additional Setup for Dell XPS 9520
 
-### Desktop Environment Installation / GNOME Installation Example
+### Post-Installation: Verify Zram Setup
 
-- Install GNOME:
+After first boot, verify zram is working:
+
+```bash
+# Check zram status
+swapon --show
+zramctl
+
+# Should show zram0 device with compression
+```
+
+### Desktop Environment Installation (Choose One)
+
+#### Option 1: GNOME (Wayland by Default)
+
+- Install essential GNOME packages with Wayland support:
   ```bash
-  pacman -S gnome gnome-extra
+  pacman -S gnome-shell gdm gnome-control-center gnome-terminal nautilus gnome-text-editor xdg-user-dirs-gtk xdg-desktop-portal-gnome
   ```
-- Enable GDM:
+- Enable GDM (uses Wayland by default):
   ```bash
   systemctl enable gdm.service
   ```
 
-- Reboot or start GDM:
+#### Option 2: Hyprland (Pure Wayland Tiling with GNOME Tools)
+
+- Install Hyprland with GNOME integration:
   ```bash
-  systemctl start gdm.service
+  pacman -S hyprland waybar mako wofi nautilus xdg-user-dirs xdg-desktop-portal-hyprland xdg-desktop-portal-gtk gnome-keyring polkit-gnome
   ```
+- Create basic Hyprland config:
+  ```bash
+  mkdir -p ~/.config/hypr
+  cp /usr/share/hyprland/hyprland.conf ~/.config/hypr/
+  ```
+
+**Note**: Both options use Wayland by default. After desktop environment installation, install recommended packages from `recommended-packages.md` for a complete system.
 
 ### Optional Configuration
 

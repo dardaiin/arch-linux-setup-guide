@@ -1,55 +1,71 @@
-# **Configure NVIDIA GeForce RTX 3050 Ti Mobile GPU on Dell XPS 9520**
+# NVIDIA GPU Configuration for Dell XPS 9520
 
-## **Prerequisites**
+This guide configures the NVIDIA GeForce RTX 3050 Ti Mobile GPU for optimal power management and hybrid graphics support.
 
-Install necessary tools and drivers using `pacman` or `yay`:
+## Prerequisites
 
-### **1. Install Nvidia Drivers and Utilities**
+**Note**: Complete the base system installation first using [`arch-base-installation.md`](arch-base-installation.md) and install essential packages from [`recommended-packages.md`](recommended-packages.md).
 
-For Nvidia drivers and tools:
+Install necessary tools and drivers:
+
+### 1. Install NVIDIA Drivers and Utilities
 
 ```bash
+# NVIDIA drivers and prime support
 sudo pacman -S nvidia nvidia-utils nvidia-prime
-```
 
-### **2. Install EnvyControl**
-
-To manage hybrid GPU modes:
-
-```bash
-yay -S envycontrol
-```
-
-### **3. Install Vulkan and OpenGL Utilities**
-
-To verify rendering and Vulkan driver usage:
-
-```bash
+# Verification tools
 sudo pacman -S vulkan-tools mesa-utils
 ```
 
----
-
-## **Set Up Hybrid Mode**
-
-Configured **EnvyControl** to hybrid mode so the Intel GPU is used by default, and the Nvidia GPU is only used on-demand using fine-grained power management.
+### 2. Install AUR Helper (if not already installed)
 
 ```bash
-envycontrol --switch hybrid --rtd3=3
-sudo reboot
+# Install paru for AUR packages
+git clone https://aur.archlinux.org/paru.git
+cd paru
+makepkg -si
+```
+
+### 3. Install EnvyControl
+
+```bash
+# Hybrid GPU mode management
+paru -S envycontrol
 ```
 
 ---
 
-## **Gnome Issue: Forces Itself on dGPU**
+## Set Up Hybrid Mode
 
-This is an issue with GNOME 43 and up, where it forces itself onto the dGPU instead of using the iGPU in Wayland setups. To fix this, we need to change EGL Vendor priority and configure GNOME to use the iGPU.
+Configure EnvyControl to hybrid mode for optimal power management:
 
-Read more [here](https://gitlab.gnome.org/GNOME/mutter/-/issues/2969).
+```bash
+# Enable hybrid mode with RTD3 power management
+envycontrol --switch hybrid --rtd3=3
+
+# Reboot to apply changes
+sudo reboot
+```
+
+**What this does:**
+- Intel GPU used by default (better battery life)
+- NVIDIA GPU powers down when not in use
+- NVIDIA GPU activates on-demand with `prime-run`
 
 ---
 
-## **1. Change EGL Vendor Priority**
+## Fix GNOME + Wayland + NVIDIA Issues
+
+**Problem**: GNOME 43+ forces itself onto the discrete GPU instead of using the integrated GPU in Wayland setups, preventing proper power management.
+
+**Solution**: Configure EGL vendor priority and force GNOME to use Intel GPU.
+
+**Reference**: [GNOME GitLab Issue #2969](https://gitlab.gnome.org/GNOME/mutter/-/issues/2969)
+
+---
+
+### 1. Change EGL Vendor Priority
 
 Ensure Mesa (Intel) is prioritized over Nvidia for EGL-based applications like GNOME Shell.
 
@@ -59,7 +75,7 @@ sudo mv /usr/share/glvnd/egl_vendor.d/10_nvidia.json /usr/share/glvnd/egl_vendor
 
 ---
 
-## **2. Configure Environment Variables**
+### 2. Configure Environment Variables
 
 Set system-wide environment variables to force Intel for rendering and Vulkan-based applications.
 
@@ -82,7 +98,7 @@ sudo reboot
 
 ---
 
-## **3. Add GNOME-Specific Configuration**
+### 3. Add GNOME-Specific Configuration
 
 Create a configuration file to ensure GNOME Shell always uses Intel, even if Nvidia drivers are loaded:
 
@@ -99,9 +115,9 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json
 
 ---
 
-# **How to Verify Everything is Working**
+## Verification and Testing
 
-## **1. Check Nvidia GPU Power State**
+### 1. Check NVIDIA GPU Power State
 
 Verify the runtime power status of the GPU:
 
@@ -120,7 +136,7 @@ watch -n 1 cat /sys/bus/pci/devices/0000:01:00.0/power/runtime_status
 
 ---
 
-## **2. Check if Nvidia GPU is Idle**
+### 2. Check if NVIDIA GPU is Idle
 
 Confirm no processes are using the Nvidia GPU:
 
@@ -138,7 +154,7 @@ sudo lsof /dev/nvidia*
 
 ---
 
-## **3. Check EGL Renderer**
+### 3. Check EGL Renderer
 
 Verify that Intel is being used for rendering:
 
@@ -150,7 +166,7 @@ Expected output: **Intel Integrated Graphics**.
 
 ---
 
-## **4. Check Vulkan Renderer**
+### 4. Check Vulkan Renderer
 
 Confirm Intel Vulkan driver is being used:
 
@@ -162,7 +178,7 @@ Look for the Intel GPU ID.
 
 ---
 
-## **5. Test Nvidia GPU on Demand**
+### 5. Test NVIDIA GPU on Demand
 
 Use Nvidia GPU with `prime-run` to ensure it powers up when needed:
 
@@ -174,7 +190,7 @@ Expected output: **Nvidia Renderer**.
 
 ---
 
-## **6. Check Logs for Errors**
+### 6. Check Logs for Errors
 
 Review logs for any Nvidia-related errors:
 
@@ -184,4 +200,27 @@ dmesg | grep -i nvidia
 
 ---
 
-This configuration ensures GNOME Shell, along with other default applications, always uses Intel, while the Nvidia GPU is powered down (`D3cold` or `suspended`) when idle. The Nvidia GPU will activate on demand when needed for tasks like gaming or rendering.
+## Summary
+
+This configuration ensures:
+
+✅ **GNOME Shell uses Intel GPU** - Better battery life and proper Wayland support  
+✅ **NVIDIA GPU powers down** - `D3cold` or `suspended` state when idle  
+✅ **On-demand NVIDIA usage** - Use `prime-run <application>` for gaming/rendering  
+✅ **Hybrid graphics working** - Best of both worlds: efficiency + performance
+
+### Usage Examples
+
+```bash
+# Run application with NVIDIA GPU
+prime-run steam
+prime-run blender
+prime-run glxgears
+
+# Normal applications use Intel GPU automatically
+firefox
+gnome-shell
+vscode
+```
+
+**Result**: Optimal battery life with high-performance graphics available when needed.
